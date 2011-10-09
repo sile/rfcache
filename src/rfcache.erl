@@ -92,6 +92,10 @@ handle_call({erase_impl, Key}, _From, State) ->
 handle_call(_, _, State) ->
     {stop, unhandled_message, State}.
 
+handle_cast({merger_nodes,Nodes1}, State) ->
+    #state{nodes=Nodes2} = State,
+    {noreply, State#state{nodes=filter_nodes(Nodes1++Nodes2)}};
+
 handle_cast(stop, State) ->
     {stop, normal, State};
 
@@ -111,6 +115,9 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%%%%%%%%%%%%%%%%%%%%
 %%% Internal Function
+filter_nodes(Nodes) ->
+    lists:filter(fun is_valid_node/1, lists:usort(Nodes)).
+
 is_valid_node(Node) ->
     case node() of
         Node -> false;
@@ -121,13 +128,15 @@ is_valid_node(Node) ->
     end.
 
 start_sync_servers(Name, Nodes, RetrieveFn) ->
-    ValidNodes = lists:filter(fun is_valid_node/1, Nodes),
+    ValidNodes = filter_nodes(Nodes),
     StartNodes = lists:filter(
                      fun (Node) ->
                              case rpc:call(Node, ?MODULE, start_link, [Name,[node()|ValidNodes],RetrieveFn]) of
                                  {badrpc, _} -> false;
                                  {ok, _} -> true;
-                                 {error, {already_started,_}} -> true;
+                                 {error, {already_started,_}} -> 
+                                     gen_server:cast({Name,Node}, {merger_nodes, [node()|ValidNodes]}),
+                                     true;
                                  _ -> false
                              end
                      end,
