@@ -1,127 +1,155 @@
 -module(rfcache).
 -behaivour(gen_server).
 
--export([start_link/2, get/2, get/3, put/3, stop/1,
-         add_node/2, sync_nodes/1]).
--export([init/1, handle_call/3, handle_cast/2,
-         handle_info/2, terminate/2, code_change/3]).
+-export([start_link/3, get/2, get/3, erase/2, erase/3, clear/1, clear/2, stop/1]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+         
+-record(state, {name, nodes, retrieve_fn}).
 
--record(state, {name,
-                nodes}).
-        
-%% TODO: 他nodeのダウンを検出
-start_link(Name, Nodes) ->
-    gen_server:start_link({local, Name}, ?MODULE, {Name,Nodes}, []).
+-define(TRY(Exp), try 
+                      Exp
+                  catch _:Reason ->
+                          {error, Reason}
+                  end).
+
+%%%%%%%%%%%%%%
+%%% Client API
+start_link(Name, Nodes, RetrieveFn) ->
+    gen_server:start_link({local, Name}, ?MODULE, {Name,Nodes,RetrieveFn}, []).
 
 get(Server, Key) ->
-    gen_server:call(Server, {get,Key}).
+    get(Server, Key, 5000).
 
 get(Server, Key, Timeout) ->
-    gen_server:call(Server, {get,Key}, Timeout).
-
-put(Server, Key, Value) ->
-    gen_server:cast(Server, {put,Key,Value}).
-    
-stop(Server) ->
-    gen_server:cast(Server,stop).
-
-add_node(Server,Node) ->
-    gen_server:cast(Server, {add_node,Node}),
-    sync_nodes(Server).
-
-sync_nodes(Server) ->
-    gen_server:cast(Server, sync_nodes).
-
-
-%%%%%%%%%%
-broadcast_entry(State, Key, Value) ->
-    #state{name=Name,nodes=Nodes} = State,
-    lists:foreach(
-      fun(Node) ->
-              gen_server:cast({Name,Node}, {internal_put, Key, Value})
-      end,
-      Nodes).
-
-is_valid_node(Node) ->
-    %% TODO: timeout
-    case net_adm:ping(Node) of
-        pong -> true;
-        _ -> false
+    case ets:lookup(Server, Key) of
+        [{_, Value}] -> {ok, Value};
+        _ -> ?TRY(gen_server:call(Server, {retrieve, Key}, Timeout))
     end.
 
-sync_nodes_impl(Name, Nodes) ->
-    lists:foreach(
-      fun (Node1) ->
-              lists:foreach(
-                fun (Node2) ->
-                        gen_server:cast({Name,Node1}, {add_node,Node2})
-                end,
-                Nodes)
-      end,
-      Nodes).
+erase(Server, Key) ->
+    erase(Server, Key, 5000).
 
-%%%%%%%%%%
-init({Name,Nodes}) ->
+erase(Server, Key, Timeout) ->
+    ?TRY(gen_server:call(Server, {erase,Key}, Timeout)).
+
+clear(Server) ->
+    clear(Server, 5000).
+    
+clear(Server, Timeout) ->
+    gen_server:call(Server, clear, Timeout).
+    
+stop(Server) ->
+    gen_server:cast(Server, stop).
+
+
+%%%%%%%%%%%%%%%%%%%%%%%
+%%% gen_server Callback
+init({Name,Nodes,RetrieveFn}) ->
     net_kernel:monitor_nodes(true),
-    ValidNodes = lists:filter(fun is_valid_node/1, Nodes),
-    sync_nodes_impl(Name,ValidNodes),
+    ets:new(Name, [named_table, set]),
     {ok, #state{name=Name,
-                nodes=ValidNodes}}.
+                nodes=start_sync_servers(Name, Nodes, RetrieveFn),
+                retrieve_fn=RetrieveFn}}.
 
-handle_call({get,Key}, _From, State) ->
-    case erlang:get(Key) of
-        {ok, Value} -> {reply, {ok,Value}, State};
-        _ -> {reply, {error,noexists}, State}
+handle_call({retrieve, Key}, _From, State) ->
+    #state{retrieve_fn=RetFn, name=Name} = State,
+    
+    Response = case ?TRY(RetFn(Key)) of
+                   {ok, Value} -> ets:insert(Name, {Key, Value}),
+                                  {ok, Value};
+                   Other -> Other
+               end,
+    {reply, Response, State};
+
+handle_call({erase, Key}, _From, State) ->
+    #state{name=Name, nodes=Nodes} = State,
+    ets:delete(Name, Key),
+    case erase_entry_on_all_node(Key, Name, Nodes) of
+        [] -> {reply, ok, State};
+        FailedNodes ->
+            {reply, {error, {failed, FailedNodes}}, State}
     end;
 
+handle_call(clear, _From, State) ->
+    #state{name=Name, nodes=Nodes} = State,
+    ets:delete(Name),
+    case clear_entry_on_all_node(Name, Nodes) of
+        [] -> {reply, ok, State};
+        FailedNodes ->
+            {reply, {error, {failed, FailedNodes}}, State}
+    end;
+
+handle_call(clear_impl, _From, State) ->
+    #state{name=Name} = State,
+    ets:delete(Name),
+    {reply, true, State};
+
+handle_call({erase_impl, Key}, _From, State) ->
+    #state{name=Name} = State,
+    ets:delete(Name, Key),
+    {reply, true, State};
+    
 handle_call(_, _, State) ->
-    {stop, normal, State}.
-
-handle_cast({put,Key,Value}, State) ->
-    erlang:put(Key, {ok,Value}),
-    broadcast_entry(State, Key, Value),
-    {noreply,State};
-
-handle_cast({internal_put,Key,Value}, State) ->
-    erlang:put(Key, {ok,Value}),
-    {noreply,State};
-
-handle_cast({add_node,Node}, State) ->
-    #state{nodes=Nodes} = State,
-    case {is_valid_node(Node), lists:member(Node,Nodes)} of
-        {false,_} ->
-            {noreply, State};
-        {_,true} ->
-            {noreply, State};
-        _ ->
-            {noreply, State#state{nodes=[Node|Nodes]}}
-    end;
-
-handle_cast(sync_nodes, State) ->
-    %% TODO: 効率化
-    #state{name=Name, nodes=Nodes} = State, 
-    sync_nodes_impl(Name,Nodes);
+    {stop, unhandled_message, State}.
 
 handle_cast(stop, State) ->
     {stop, normal, State};
 
 handle_cast(_, State) ->
-    {stop, normal, State}.
-
-handle_info({nodeup,Node},State) ->
-    io:format("#[LOG]: nodeup ~p~n", [Node]),
-    {noreply, State};
+    {stop, unhandled_message, State}.
 
 handle_info({nodedown,Node},State) ->
-    io:format("#[LOG]: nodedown ~p~n", [Node]),
     #state{nodes=Nodes} = State,
     {noreply, State#state{nodes=lists:delete(Node,Nodes)}};
+ 
+handle_info(_Info,State) -> 
+    {noreply, State}.
 
-handle_info(Info,State) ->
-    {stop,Info,State}.
+terminate(_Reason, _State) -> ok.
+code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-terminate(Reason, State) ->
-    {stop,Reason,State}.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+%%%%%%%%%%%%%%%%%%%%%
+%%% Internal Function
+is_valid_node(Node) ->
+    case node() of
+        Node -> false;
+        _ -> case net_adm:ping(Node) of
+                 pong -> true;
+                 _ -> false
+             end
+    end.
+
+start_sync_servers(Name, Nodes, RetrieveFn) ->
+    ValidNodes = lists:filter(fun is_valid_node/1, Nodes),
+    StartNodes = lists:filter(
+                     fun (Node) ->
+                             case rpc:call(Node, ?MODULE, start_link, [Name,[node()|ValidNodes],RetrieveFn]) of
+                                 {badrpc, _} -> false;
+                                 {ok, _} -> true;
+                                 {error, {already_started,_}} -> true;
+                                 _ -> false
+                             end
+                     end,
+                     ValidNodes),
+    StartNodes.
+
+call_on_all_node(Name, Nodes, Message) ->
+    lists:filter(
+      fun (Node) ->
+              Succeeded =
+                  try
+                      gen_server:call({Name, Node}, Message) 
+                  catch 
+                      _:_ ->  
+                          false
+                  end,
+              not Succeeded
+      end,
+      Nodes).    
+
+erase_entry_on_all_node(Key, Name, Nodes) ->
+    call_on_all_node(Name, Nodes, {erase_impl,Key}).
+
+clear_entry_on_all_node(Name, Nodes) ->
+    call_on_all_node(Name, Nodes, clear_impl).
