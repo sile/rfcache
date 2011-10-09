@@ -1,0 +1,59 @@
+[概要]
+・分散キャッシュ
+　・キャッシュ済みデータの読み込みが高速 (ets:lookup一回分)
+　・ノード間で同期を取るのは、要素の削除時のみ
+
+
+[バージョン]
+・0.0.1
+
+
+[API]
+###
+# Name = atom()
+# Nodes = [atom()]
+# RetrieveFn = fun(Key) -> {ok,Value} | {error,Reason} end
+# rfcache:start_link(Name, Nodes, RetrieveFn) -> {ok, Pid} | {error, Reason}
+　キャッシュサーバを起動する。
+　- Name: キャッシュサーバの名前。以降の操作では、(PIDではなく)この名前がサーバのIDとして使用される必要がある
+　- Nodes: 同期を取るノード群。
+　　　　　 ここに含まれるノードでは、自動的にrfcache:start_link/3が呼び出され、サーバが起動される。
+　　　　　 通信やサーバの起動が行えなかったノードは、同期対象から除外される。
+　- RetrieveFn: キーに紐付くデータがキャッシュに存在しない場合に、データを取得するために呼び出される関数
+
+###
+# Server = atom()
+# Key = term()
+# Timeout = integer() | infinity
+# rfcache:get(Server, Key, Timeout) -> {ok, Value} | {error, Reason}
+　キャッシュデータを取得する。
+　キャッシュデータが存在しない場合は rfcache:start_link/3 に渡した RetrieveFn を Key を引数として呼び出し、
+　その結果を返す。(RetrieveFn が {ok,Value} を返した場合は Value がキャッシュに登録されることになる)
+　- Server: サーバのID。rfcache:start_link/3 の Name 引数
+　- Key: 検索キー
+　- Timeout: タイムアウト時間
+
+###
+# rfcache:get(Server, Key) = rfcache:get(Server, Key, 5000)
+
+###
+# rfcache:erase(Server, Key, Timeout) -> ok | {error, Reason}
+　Keyに紐付くキャッシュデータを削除する。
+　同期ノード上の全てのノードに対して削除処理が成功した場合のみ ok を返す。
+　- Server: サーバのID。rfcache:start_link/3 の Name 引数
+　- Key: 検索キー
+　- Timeout: タイムアウト時間
+
+###
+# rfcache:erase(Server, Key) = rfcache:erase(Server, Key, 5000)
+
+###
+# rfcache:clear(Server, Timeout) -> ok | {error, Reason}
+　全てのキャッシュデータを消去する。
+　同期ノード上の全てのノードに対して消去処理が成功した場合のみ ok を返す。
+　- Server: サーバのID。rfcache:start_link/3 の Name 引数
+　- Timeout: タイムアウト時間
+
+###
+# rfcache:stop(Server) -> ok 
+　キャッシュサーバを停止する。
