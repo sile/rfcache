@@ -46,7 +46,7 @@ stop(Server) ->
 %%% gen_server Callback
 init({Name,Nodes,RetrieveFn}) ->
     net_kernel:monitor_nodes(true),
-    ets:new(Name, [named_table, set]),
+    ets:new(Name, [named_table, set, {read_concurrency,true}]),
     {ok, #state{name=Name,
                 nodes=start_sync_servers(Name, Nodes, RetrieveFn),
                 retrieve_fn=RetrieveFn}}.
