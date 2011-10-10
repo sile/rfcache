@@ -80,13 +80,11 @@ handle_call(clear, _From, State) ->
     end;
 
 handle_call(clear_impl, _From, State) ->
-    #state{name=Name} = State,
-    ets:delete(Name),
+    ets:delete(State#state.name),
     {reply, true, State};
 
 handle_call({erase_impl, Key}, _From, State) ->
-    #state{name=Name} = State,
-    ets:delete(Name, Key),
+    ets:delete(State#state.name, Key),
     {reply, true, State};
     
 handle_call(_, _, State) ->
@@ -96,7 +94,15 @@ handle_cast({merger_nodes,Nodes1}, State) ->
     #state{nodes=Nodes2} = State,
     {noreply, State#state{nodes=filter_nodes(Nodes1++Nodes2)}};
 
+handle_cast({remove_node,Node}, State) ->
+    #state{nodes=Nodes} = State,
+    {noreply, State#state{nodes=lists:delete(Node, Nodes)}}; 
+
 handle_cast(stop, State) ->
+    #state{name=Name, nodes=Nodes} = State,
+    ets:delete(Name),
+    lists:foreach(fun (Node) -> gen_server:cast({Name,Node}, {remove_node,Node}) end,
+                  Nodes),
     {stop, normal, State};
 
 handle_cast(_, State) ->
