@@ -51,9 +51,7 @@ init({Name,Nodes,RetrieveFn}) ->
                 nodes=start_sync_servers(Name, Nodes, RetrieveFn),
                 retrieve_fn=RetrieveFn}}.
 
-handle_call({retrieve, Key}, _From, State) ->
-    #state{retrieve_fn=RetFn, name=Name} = State,
-    
+handle_call({retrieve, Key}, _From, #state{retrieve_fn=RetFn, name=Name}=State) ->
     Response = case ?TRY(RetFn(Key)) of
                    {ok, Value} -> ets:insert(Name, {Key, Value}),
                                   {ok, Value};
@@ -61,8 +59,7 @@ handle_call({retrieve, Key}, _From, State) ->
                end,
     {reply, Response, State};
 
-handle_call({erase, Key}, _From, State) ->
-    #state{name=Name, nodes=Nodes} = State,
+handle_call({erase, Key}, _From, #state{name=Name, nodes=Nodes}=State) ->
     ets:delete(Name, Key),
     case erase_entry_on_all_node(Key, Name, Nodes) of
         [] -> {reply, ok, State};
@@ -70,8 +67,7 @@ handle_call({erase, Key}, _From, State) ->
             {reply, {error, {failed, FailedNodes}}, State}
     end;
 
-handle_call(clear, _From, State) ->
-    #state{name=Name, nodes=Nodes} = State,
+handle_call(clear, _From, #state{name=Name, nodes=Nodes}=State) ->
     ets:delete(Name),
     case clear_entry_on_all_node(Name, Nodes) of
         [] -> {reply, ok, State};
@@ -90,32 +86,30 @@ handle_call({erase_impl, Key}, _From, State) ->
 handle_call(_, _, State) ->
     {stop, unhandled_message, State}.
 
-handle_cast({merger_nodes,Nodes1}, State) ->
-    #state{nodes=Nodes2} = State,
+handle_cast({merger_nodes,Nodes1}, #state{nodes=Nodes2}=State) ->
     {noreply, State#state{nodes=filter_nodes(Nodes1++Nodes2)}};
 
-handle_cast({remove_node,Node}, State) ->
-    #state{nodes=Nodes} = State,
+handle_cast({remove_node,Node}, #state{nodes=Nodes}=State) ->
     {noreply, State#state{nodes=lists:delete(Node, Nodes)}}; 
 
-handle_cast(stop, State) ->
-    #state{name=Name, nodes=Nodes} = State,
+handle_cast(stop, #state{name=Name, nodes=Nodes}=State) ->
     ets:delete(Name),
-    lists:foreach(fun (Node) -> gen_server:cast({Name,Node}, {remove_node,Node}) end,
-                  Nodes),
+    broadcast(Name, Nodes, {remove_node,self()}),
     {stop, normal, State};
 
 handle_cast(_, State) ->
     {stop, unhandled_message, State}.
 
-handle_info({nodedown,Node},State) ->
-    #state{nodes=Nodes} = State,
+handle_info({nodedown,Node}, #state{nodes=Nodes}=State) ->
     {noreply, State#state{nodes=lists:delete(Node,Nodes)}};
  
 handle_info(_Info,State) -> 
     {noreply, State}.
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, #state{name=Name, nodes=Nodes}) -> 
+    broadcast(Name, Nodes, {remove_node,self()}),
+    ok.
+
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 
@@ -133,20 +127,24 @@ is_valid_node(Node) ->
              end
     end.
 
+broadcast(Name, Nodes, Message) ->
+    lists:foreach(fun (Node) -> gen_server:cast({Name,Node}, Message) end, Nodes).
+
 start_sync_servers(Name, Nodes, RetrieveFn) ->
     ValidNodes = filter_nodes(Nodes),
-    StartNodes = lists:filter(
-                     fun (Node) ->
-                             case rpc:call(Node, ?MODULE, start_link, [Name,[node()|ValidNodes],RetrieveFn]) of
-                                 {badrpc, _} -> false;
-                                 {ok, _} -> true;
+    StartNodes = 
+        lists:filter(
+          fun (Node) ->
+                  case rpc:call(Node, ?MODULE, start_link, [Name,[node()|ValidNodes],RetrieveFn]) of
+                      {badrpc, _} -> false;
+                      {ok, _} -> true;
                                  {error, {already_started,_}} -> 
-                                     gen_server:cast({Name,Node}, {merger_nodes, [node()|ValidNodes]}),
-                                     true;
-                                 _ -> false
-                             end
-                     end,
-                     ValidNodes),
+                          gen_server:cast({Name,Node}, {merger_nodes, [node()|ValidNodes]}),
+                          true;
+                      _ -> false
+                  end
+          end,
+          ValidNodes),
     StartNodes.
 
 call_on_all_node(Name, Nodes, Message) ->
