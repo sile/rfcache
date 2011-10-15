@@ -22,8 +22,8 @@ get(Server, Key) ->
 
 get(Server, Key, Timeout) ->
     case ets:lookup(Server, Key) of
-        [{_, Value}] -> {ok, Value};
-        _ -> ?TRY(gen_server:call(Server, {retrieve, Key}, Timeout))
+        [{_, Value, _}] -> {ok, Value};
+        _ -> ?TRY(gen_server:call(Server, {retrieve, Key, now()}, Timeout))
     end.
 
 erase(Server, Key) ->
@@ -51,11 +51,17 @@ init({Name,Nodes,RetrieveFn}) ->
                 nodes=start_sync_servers(Name, Nodes, RetrieveFn),
                 retrieve_fn=RetrieveFn}}.
 
-handle_call({retrieve, Key}, _From, #state{retrieve_fn=RetFn, name=Name}=State) ->
-    Response = case ?TRY(RetFn(Key)) of
-                   {ok, Value} -> ets:insert(Name, {Key, Value}),
-                                  {ok, Value};
-                   Other -> Other
+handle_call({retrieve, Key, RequestedTime}, _From, #state{retrieve_fn=RetFn, name=Name}=State) ->
+    Response = case ets:lookup(Name,Key) of
+                   [{_, Value, RetrievedTime}] when RequestedTime < RetrievedTime ->
+                       {ok, Value};
+                   _ ->
+                       case ?TRY(RetFn(Key)) of
+                           {ok, Value} -> 
+                               ets:insert(Name, {Key, Value, now()}),
+                               {ok, Value};
+                           Other -> Other
+                       end
                end,
     {reply, Response, State};
 
