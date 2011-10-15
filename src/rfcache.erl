@@ -74,7 +74,7 @@ handle_call({erase, Key}, _From, #state{name=Name, nodes=Nodes}=State) ->
     end;
 
 handle_call(clear, _From, #state{name=Name, nodes=Nodes}=State) ->
-    ets:delete(Name),
+    ets:delete_all_objects(Name),
     case clear_entry_on_all_node(Name, Nodes) of
         [] -> {reply, ok, State};
         FailedNodes ->
@@ -82,7 +82,7 @@ handle_call(clear, _From, #state{name=Name, nodes=Nodes}=State) ->
     end;
 
 handle_call(clear_impl, _From, State) ->
-    ets:delete(State#state.name),
+    ets:delete_all_objects(State#state.name),
     {reply, true, State};
 
 handle_call({erase_impl, Key}, _From, State) ->
@@ -144,7 +144,7 @@ start_sync_servers(Name, Nodes, RetrieveFn) ->
                   case rpc:call(Node, ?MODULE, start_link, [Name,[node()|ValidNodes],RetrieveFn]) of
                       {badrpc, _} -> false;
                       {ok, _} -> true;
-                                 {error, {already_started,_}} -> 
+                      {error, {already_started,_}} -> 
                           gen_server:cast({Name,Node}, {merger_nodes, [node()|ValidNodes]}),
                           true;
                       _ -> false
